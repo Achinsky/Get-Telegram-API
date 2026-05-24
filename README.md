@@ -1,39 +1,31 @@
 # Get Telegram API
 
-Утилита для автоматического получения Telegram `api_id` и `api_hash`.
+Portable utility for automatic extraction of:
+- api_id
+- api_hash
 
-## Возможности
+Works locally on your PC.
 
-- Автоматическая авторизация через my.telegram.org
-- Получение api_id и api_hash
+No third-party servers.
+No data collection.
 
-## Запуск
+## Usage
 
-1. Качай:
-   `Get Telegram API.exe`
+1. Download ZIP
+2. Extract archive
+3. Run EXE
+4. Enter phone number
+5. Confirm login code
+6. Done
 
-2. Запусти файл
+## Features
 
-3. Введи номер телефона
+- Portable EXE
+- Embedded Chromium
+- Automatic app creation
+- Automatic API extraction
 
-4. Подтверди код из Telegram
+## Security
 
-5. Получи API данные
-
-## Безопасность
-
-- Все данные обрабатываются локально
-- Никакие данные не отправляются на сервер
-- Исходный код открыт
-
-## Сборка
-
-```bash
-pip install -r requirements.txt
-playwright install chromium
-
-pyinstaller --onefile --noconsole --windowed ^
---icon=assets/TGAPIEXT.ico ^
---name "Get Telegram API" ^
---collect-all customtkinter ^
-tg_api_extractor.py
+Everything works locally through Playwright.
+Your data is not sent anywhere.
