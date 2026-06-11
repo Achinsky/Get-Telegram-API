@@ -1,4 +1,5 @@
 import csv
+import io
 import json
 import queue
 import random
@@ -15,18 +16,17 @@ from tkinter import messagebox
 import pyperclip
 from playwright.sync_api import sync_playwright
 
-OUTPUT_DIR   = Path("output")
-OUTPUT_FILE  = OUTPUT_DIR / "credentials.json"
-SETTINGS_FILE = Path(get_base_path() if False else ".") / "settings.json"
+OUTPUT_DIR    = Path("output")
+OUTPUT_FILE   = OUTPUT_DIR / "credentials.json"
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
 
-ACCENT       = "#29A9E0"
-ACCENT_HOV   = "#1A8BBF"
-SIDEBAR_BG   = ("#1a1d23", "#1a1d23")
-CONTENT_BG   = ("#141618", "#141618")
-CARD_BG      = ("#1e2128", "#1e2128")
+ACCENT        = "#29A9E0"
+ACCENT_HOV    = "#1A8BBF"
+SIDEBAR_BG    = ("#1a1d23", "#1a1d23")
+CONTENT_BG    = ("#141618", "#141618")
+CARD_BG       = ("#1e2128", "#1e2128")
 SIDEBAR_WIDTH = 180
 
 TI = {
@@ -60,8 +60,8 @@ def load_settings() -> dict:
 
 def save_settings(d: dict):
     try:
-        SETTINGS_FILE.write_text(json.dumps(d, ensure_ascii=False, indent=2),
-                                 encoding="utf-8")
+        SETTINGS_FILE.write_text(
+            json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
 
@@ -200,17 +200,15 @@ class TelegramExtractor:
 
     def _create_app(self):
         self._log("[+] Создаём приложение...")
-        # Use only VISIBLE text inputs — skip hidden fields like input[name="hash"]
-        visible_inputs = self.page.locator(
-            "input[type='text']:visible, input:not([type]):visible"
-        )
-        visible_inputs.first.wait_for(timeout=10000)
-        count = visible_inputs.count()
-        if count >= 1:
-            visible_inputs.nth(0).fill(f"MyApp{random.randint(1000, 9999)}")
-        if count >= 2:
-            visible_inputs.nth(1).fill(f"personalapi{random.randint(1000, 9999)}")
-
+        # Skip hidden inputs (e.g. input[name="hash"]) — only fill visible text fields
+        visible = self.page.locator(
+            "input[type='text']:visible, input:not([type]):visible")
+        visible.first.wait_for(timeout=10000)
+        n = visible.count()
+        if n >= 1:
+            visible.nth(0).fill(f"MyApp{random.randint(1000, 9999)}")
+        if n >= 2:
+            visible.nth(1).fill(f"personalapi{random.randint(1000, 9999)}")
         ta = self.page.locator("textarea")
         if ta.count():
             ta.first.fill("Personal Telegram API")
@@ -224,6 +222,14 @@ class TelegramExtractor:
             pass
         self.page.get_by_text("Create application").click()
         self.page.wait_for_load_state("networkidle")
+
+    def _input_val(self, name: str) -> str:
+        """Read actual value of an input field by name attribute via JS."""
+        try:
+            return (self.page.locator(f'input[name="{name}"]')
+                    .input_value(timeout=3000).strip())
+        except Exception:
+            return ""
 
     def _extract(self) -> dict:
         self._log("[+] Переходим на страницу приложений...")
@@ -242,19 +248,19 @@ class TelegramExtractor:
         if not m_id or not m_hash:
             raise RuntimeError("Не удалось найти api_id / api_hash на странице")
 
-        m_title = re.search(r"App title:\s*(.+)", text)
-        m_short = re.search(r"Short name:\s*(.+)", text)
-        m_test  = re.search(r"Test configuration:\s*([\d.:]+)", text)
-        m_prod  = re.search(r"Production configuration:\s*([\d.:]+)", text)
-        keys    = re.findall(
+        m_test = re.search(r"Test configuration:\s*([\d.:]+)", text)
+        m_prod = re.search(r"Production configuration:\s*([\d.:]+)", text)
+        keys   = re.findall(
             r"(-----BEGIN RSA PUBLIC KEY-----.*?-----END RSA PUBLIC KEY-----)",
             text, re.S)
 
+        # Read title and short name directly from DOM to avoid
+        # false matches against placeholder/label text in inner_text()
         data = {
             "api_id":            int(m_id.group(1)),
             "api_hash":          m_hash.group(1),
-            "app_title":         m_title.group(1).strip() if m_title else "",
-            "short_name":        m_short.group(1).strip() if m_short else "",
+            "app_title":         self._input_val("app_title"),
+            "short_name":        self._input_val("app_short_name"),
             "test_server":       m_test.group(1) if m_test else "",
             "production_server": m_prod.group(1) if m_prod else "",
             "public_keys":       keys,
@@ -286,27 +292,23 @@ def _lbl(parent, text, size=13, bold=False, color=None, **kw):
 
 
 def _mask(value: str) -> str:
-    """Replace value with bullet dots for privacy mode."""
-    return "•" * min(len(value), 16)
+    return "•" * min(max(len(value), 8), 20)
 
 
 class CopyButton(ctk.CTkButton):
-    """Icon button that flashes ✓ for 1.5 s after copying."""
+    """Small copy icon — flashes ✓ in accent colour for 1.5 s after copy."""
 
     def __init__(self, parent, get_value, **kw):
         self._get_value = get_value
         char, font = _ti("copy", 13)
         super().__init__(
-            parent,
-            text=char,
+            parent, text=char,
             font=font if _tabler_loaded else _sf(11),
             width=28, height=22,
             fg_color="transparent",
             hover_color=("#2a2d35", "#2a2d35"),
             text_color=("gray55", "gray55"),
-            command=self._do_copy,
-            **kw
-        )
+            command=self._do_copy, **kw)
 
     def _do_copy(self):
         try:
@@ -314,20 +316,18 @@ class CopyButton(ctk.CTkButton):
         except Exception:
             return
         ok_char, ok_font = _ti("check", 13)
-        self.configure(text=ok_char,
-                       text_color=(ACCENT, ACCENT),
+        self.configure(text=ok_char, text_color=(ACCENT, ACCENT),
                        font=ok_font if _tabler_loaded else _sf(11))
         self.after(1500, self._reset)
 
     def _reset(self):
         char, font = _ti("copy", 13)
-        self.configure(text=char,
-                       text_color=("gray55", "gray55"),
+        self.configure(text=char, text_color=("gray55", "gray55"),
                        font=font if _tabler_loaded else _sf(11))
 
 
-def _data_card(parent, label: str, value: str, col: int, row: int,
-               hide: bool = False):
+def _data_card(parent, label: str, value: str,
+               col: int, row: int, hide: bool = False):
     display = _mask(value) if hide else value
     card = ctk.CTkFrame(parent, corner_radius=8, fg_color=CARD_BG)
     card.grid(row=row, column=col,
@@ -346,14 +346,14 @@ def _data_card(parent, label: str, value: str, col: int, row: int,
     return card
 
 
-def _key_card(parent, label: str, value: str, col: int, row: int,
-              hide: bool = False):
+def _key_card(parent, label: str, value: str,
+              col: int, row: int, hide: bool = False):
+    """RSA key card — word-wrap, no horizontal scrollbar, clean look."""
     display = _mask(value) if hide else value.strip()
     card = ctk.CTkFrame(parent, corner_radius=8, fg_color=CARD_BG)
     card.grid(row=row, column=col,
               padx=(0 if col == 0 else 6, 0), pady=4, sticky="nsew")
     card.grid_columnconfigure(0, weight=1)
-    card.grid_rowconfigure(1, weight=1)
 
     top = ctk.CTkFrame(card, fg_color="transparent")
     top.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
@@ -362,10 +362,14 @@ def _key_card(parent, label: str, value: str, col: int, row: int,
         row=0, column=0, sticky="w")
     CopyButton(top, lambda v=value: v).grid(row=0, column=1, sticky="e")
 
-    tb = ctk.CTkTextbox(card, height=110, state="disabled",
-                        font=(_sf(10)[0], 10), wrap="none",
-                        fg_color="transparent")
-    tb.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+    # Use word wrap so text fills the card without a horizontal scrollbar
+    tb = ctk.CTkTextbox(card, height=140, state="disabled",
+                        font=(_sf(10)[0], 10),
+                        wrap="word",
+                        fg_color="transparent",
+                        scrollbar_button_color=CARD_BG,
+                        scrollbar_button_hover_color="#252830")
+    tb.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
     tb.configure(state="normal")
     tb.insert("end", display)
     tb.configure(state="disabled")
@@ -422,8 +426,7 @@ class MainTab(ctk.CTkFrame):
         r1 = ctk.CTkFrame(self, fg_color="transparent")
         r1.grid(row=2, column=0, sticky="ew", padx=28, pady=(0, 10))
         r1.grid_columnconfigure(0, weight=1)
-        self.phone = ctk.CTkEntry(r1, placeholder_text="+79991234567",
-                                  height=38)
+        self.phone = ctk.CTkEntry(r1, placeholder_text="+79991234567", height=38)
         self.phone.grid(row=0, column=0, sticky="ew", padx=(0, 10))
         self.btn_get = ctk.CTkButton(
             r1, text="Получить код", width=140, height=38,
@@ -434,8 +437,7 @@ class MainTab(ctk.CTkFrame):
         r2 = ctk.CTkFrame(self, fg_color="transparent")
         r2.grid(row=3, column=0, sticky="ew", padx=28, pady=(0, 16))
         r2.grid_columnconfigure(0, weight=1)
-        self.code = ctk.CTkEntry(r2, placeholder_text="Код из Telegram",
-                                 height=38)
+        self.code = ctk.CTkEntry(r2, placeholder_text="Код из Telegram", height=38)
         self.code.grid(row=0, column=0, sticky="ew", padx=(0, 10))
         self.btn_ok = ctk.CTkButton(
             r2, text="Подтвердить", width=140, height=38,
@@ -456,8 +458,7 @@ class MainTab(ctk.CTkFrame):
 
         self.log_box = ctk.CTkTextbox(
             self, height=180, state="disabled", font=_sf(12))
-        self.log_box.grid(row=5, column=0, sticky="nsew",
-                          padx=28, pady=(0, 28))
+        self.log_box.grid(row=5, column=0, sticky="nsew", padx=28, pady=(0, 28))
 
     def log(self, text):
         self.after(0, lambda t=text: self._ap(t))
@@ -502,8 +503,7 @@ class MainTab(ctk.CTkFrame):
             self.log("[!] Введите код")
             return
         self.btn_ok.configure(state="disabled")
-        threading.Thread(target=self._t_confirm, args=(code,),
-                         daemon=True).start()
+        threading.Thread(target=self._t_confirm, args=(code,), daemon=True).start()
 
     def _t_confirm(self, code):
         try:
@@ -532,32 +532,27 @@ class DataTab(ctk.CTkFrame):
 
         _lbl(self._scroll, "Мои данные", 20, bold=True).grid(
             row=0, column=0, sticky="w", padx=28, pady=(28, 2))
-        self._sub = _lbl(
-            self._scroll,
-            "Данные появятся после успешной авторизации",
-            color=("gray50", "gray50"))
+        self._sub = _lbl(self._scroll,
+                         "Данные появятся после успешной авторизации",
+                         color=("gray50", "gray50"))
         self._sub.grid(row=1, column=0, sticky="w", padx=28, pady=(0, 20))
 
         self._app_frame = ctk.CTkFrame(self._scroll, fg_color="transparent")
-        self._app_frame.grid(row=2, column=0, sticky="ew", padx=28,
-                             pady=(0, 8))
+        self._app_frame.grid(row=2, column=0, sticky="ew", padx=28, pady=(0, 8))
         self._app_frame.grid_columnconfigure((0, 1), weight=1)
 
         self._srv_frame = ctk.CTkFrame(self._scroll, fg_color="transparent")
-        self._srv_frame.grid(row=3, column=0, sticky="ew", padx=28,
-                             pady=(0, 8))
+        self._srv_frame.grid(row=3, column=0, sticky="ew", padx=28, pady=(0, 8))
         self._srv_frame.grid_columnconfigure((0, 1), weight=1)
 
         self._key_frame = ctk.CTkFrame(self._scroll, fg_color="transparent")
-        self._key_frame.grid(row=4, column=0, sticky="ew", padx=28,
-                             pady=(0, 8))
+        self._key_frame.grid(row=4, column=0, sticky="ew", padx=28, pady=(0, 8))
         self._key_frame.grid_columnconfigure((0, 1), weight=1)
 
         _lbl(self._scroll, "Экспорт", 13, bold=True).grid(
             row=5, column=0, sticky="w", padx=28, pady=(8, 6))
         self._exp_frame = ctk.CTkFrame(self._scroll, fg_color="transparent")
-        self._exp_frame.grid(row=6, column=0, sticky="w", padx=28,
-                             pady=(0, 28))
+        self._exp_frame.grid(row=6, column=0, sticky="w", padx=28, pady=(0, 28))
 
     def update_data(self, data: dict):
         self._data = data
@@ -565,7 +560,6 @@ class DataTab(ctk.CTkFrame):
         self.refresh_cards()
 
     def refresh_cards(self):
-        """Re-draw cards honouring current hide_data setting."""
         if not self._data:
             return
         data = self._data
@@ -581,24 +575,24 @@ class DataTab(ctk.CTkFrame):
         _data_card(self._app_frame, "App api_hash",
                    data["api_hash"],   1, 0, hide)
         _data_card(self._app_frame, "App title",
-                   data.get("app_title", "—"), 0, 1, hide)
+                   data.get("app_title") or "—", 0, 1, hide)
         _data_card(self._app_frame, "Short name",
-                   data.get("short_name", "—"), 1, 1, hide)
+                   data.get("short_name") or "—", 1, 1, hide)
 
         _data_card(self._srv_frame, "Test server",
-                   data.get("test_server", "—"), 0, 0, hide)
+                   data.get("test_server") or "—", 0, 0, hide)
         _data_card(self._srv_frame, "Production server",
-                   data.get("production_server", "—"), 1, 0, hide)
+                   data.get("production_server") or "—", 1, 0, hide)
 
         keys = data.get("public_keys", [])
         for i, key in enumerate(keys[:2]):
-            _key_card(self._key_frame, f"Public key {i+1}",
+            _key_card(self._key_frame, f"Public key {i + 1}",
                       key, i, 0, hide)
 
-        fmts = [(".json", self._ej), (".txt", self._et),
-                (".env",  self._ee), (".csv", self._ec),
-                (".md",   self._em)]
-        for lbl_text, cmd in fmts:
+        for lbl_text, cmd in [
+            (".json", self._ej), (".txt", self._et),
+            (".env",  self._ee), (".csv", self._ec), (".md", self._em)
+        ]:
             ctk.CTkButton(
                 self._exp_frame, text=lbl_text, command=cmd,
                 width=72, height=30,
@@ -637,10 +631,10 @@ class DataTab(ctk.CTkFrame):
         if not self._data:
             return
         OUTPUT_DIR.mkdir(exist_ok=True)
-        with open(OUTPUT_DIR / "credentials.json", "w", encoding="utf-8") as f:
+        p = OUTPUT_DIR / "credentials.json"
+        with open(p, "w", encoding="utf-8") as f:
             json.dump(self._data, f, ensure_ascii=False, indent=4)
-        messagebox.showinfo("Экспорт",
-                            f"Сохранено: {OUTPUT_DIR / 'credentials.json'}")
+        messagebox.showinfo("Экспорт", f"Сохранено: {p}")
 
     def _et(self):
         if self._data:
@@ -659,7 +653,6 @@ class DataTab(ctk.CTkFrame):
     def _ec(self):
         if not self._data:
             return
-        import io
         buf = io.StringIO()
         w = csv.writer(buf)
         w.writerow(["field", "value"])
@@ -725,8 +718,7 @@ class SettingsTab(ctk.CTkFrame):
             _lbl(info, name, 13, bold=True).pack(anchor="w")
             _lbl(info, desc, 12, color=("gray50", "gray50")).pack(anchor="w")
             sw = ctk.CTkSwitch(r, text="", width=46,
-                               button_color=ACCENT,
-                               progress_color=ACCENT,
+                               button_color=ACCENT, progress_color=ACCENT,
                                command=lambda k=key: self._toggled(k))
             sw.grid(row=0, column=1)
             if settings.get(key, False):
@@ -754,8 +746,8 @@ class AboutTab(ctk.CTkFrame):
 
         badge = ctk.CTkFrame(self, corner_radius=6, fg_color=CARD_BG)
         badge.grid(row=1, column=0, sticky="w", padx=28, pady=(0, 16))
-        _lbl(badge, "v1.1.0", 12,
-             color=("gray70", "gray70")).pack(padx=12, pady=6)
+        _lbl(badge, "v1.1.0", 12, color=("gray70", "gray70")).pack(
+            padx=12, pady=6)
 
         _lbl(self,
              "Portable-утилита для автоматического получения api_id и api_hash\n"
@@ -764,13 +756,12 @@ class AboutTab(ctk.CTkFrame):
              13, color=("gray50", "gray50"), justify="left").grid(
             row=2, column=0, sticky="w", padx=28, pady=(0, 20))
 
-        links = [
+        for i, (text, url) in enumerate([
             ("  github.com/Achinsky/Get-Telegram-API",
              "https://github.com/Achinsky/Get-Telegram-API"),
             ("  t.me/zaurachinsky",
              "https://t.me/zaurachinsky"),
-        ]
-        for i, (text, url) in enumerate(links):
+        ]):
             ctk.CTkButton(
                 self, text=text, anchor="w",
                 fg_color="transparent",
@@ -780,9 +771,8 @@ class AboutTab(ctk.CTkFrame):
                 command=lambda u=url: webbrowser.open(u)
             ).grid(row=i + 3, column=0, sticky="w", padx=22, pady=1)
 
-        _lbl(self, "  MIT License", 13,
-             color=("gray50", "gray50")).grid(
-            row=len(links) + 3, column=0, sticky="w", padx=28, pady=1)
+        _lbl(self, "  MIT License", 13, color=("gray50", "gray50")).grid(
+            row=5, column=0, sticky="w", padx=28, pady=1)
 
 
 # ---------------------------------------------------------------------------
@@ -792,13 +782,11 @@ class AboutTab(ctk.CTkFrame):
 class TelegramExtractorApp:
     def __init__(self):
         self._settings = load_settings()
-
         self.root = ctk.CTk()
         self.root.geometry("860x600")
         self.root.minsize(720, 500)
         self.root.title("Get Telegram API")
         self._load_icon()
-
         self.extractor = TelegramExtractor(log_cb=self._log)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
         self._build()
@@ -825,7 +813,6 @@ class TelegramExtractorApp:
         self.root.grid_columnconfigure(1, weight=1)
         self.root.grid_rowconfigure(0, weight=1)
 
-        # Sidebar
         sb = ctk.CTkFrame(self.root, width=SIDEBAR_WIDTH, corner_radius=0,
                           fg_color=SIDEBAR_BG)
         sb.grid(row=0, column=0, sticky="nsew")
@@ -833,16 +820,14 @@ class TelegramExtractorApp:
         sb.grid_rowconfigure(10, weight=1)
         sb.grid_columnconfigure(0, weight=1)
 
-        title_fr = ctk.CTkFrame(sb, fg_color="transparent")
-        title_fr.grid(row=0, column=0, sticky="ew", pady=(22, 16))
-        _lbl(title_fr, "Get Telegram API", 13, bold=True,
+        tf = ctk.CTkFrame(sb, fg_color="transparent")
+        tf.grid(row=0, column=0, sticky="ew", pady=(22, 16))
+        _lbl(tf, "Get Telegram API", 13, bold=True,
              color=("gray90", "gray90")).pack(anchor="center")
 
-        ctk.CTkFrame(sb, height=1,
-                     fg_color=("gray20", "gray20")).grid(
+        ctk.CTkFrame(sb, height=1, fg_color=("gray20", "gray20")).grid(
             row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
 
-        # Content
         cont = ctk.CTkFrame(self.root, corner_radius=0, fg_color=CONTENT_BG)
         cont.grid(row=0, column=1, sticky="nsew")
         cont.grid_columnconfigure(0, weight=1)
@@ -864,11 +849,12 @@ class TelegramExtractorApp:
         for t in self._tabs.values():
             t.grid(row=0, column=0, sticky="nsew")
 
-        nav = [("main",     "home",        "Главная"),
-               ("data",     "key",         "Мои данные"),
-               ("settings", "settings",    "Настройки")]
         self._btns = {}
-        for i, (k, ic, lbl) in enumerate(nav):
+        for i, (k, ic, lbl) in enumerate([
+            ("main",     "home",        "Главная"),
+            ("data",     "key",         "Мои данные"),
+            ("settings", "settings",    "Настройки"),
+        ]):
             b = NavButton(sb, lbl, ic, cmd=lambda x=k: self._show(x))
             b.grid(row=i + 2, column=0, padx=8, pady=2, sticky="ew")
             self._btns[k] = b
@@ -894,9 +880,7 @@ class TelegramExtractorApp:
         self._show("data")
 
     def _on_setting_change(self, key: str):
-        """Called when any setting toggle changes."""
         save_settings(self._settings)
-        # If hide_data toggled, refresh data cards immediately
         if key == "hide_data":
             self.data_tab.refresh_cards()
 
