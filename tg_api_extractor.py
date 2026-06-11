@@ -1,12 +1,7 @@
-import asyncio
-
-asyncio.set_event_loop_policy(
-    asyncio.WindowsProactorEventLoopPolicy()
-)
-
 import json
 import random
 import re
+import threading
 from pathlib import Path
 import sys
 import os
@@ -28,7 +23,7 @@ class TelegramExtractorApp:
         self.root = ctk.CTk()
         self.root.geometry("700x700")
         self.root.title("Get Telegram API")
-        
+
         try:
             base_path = getattr(
                 sys,
@@ -37,9 +32,7 @@ class TelegramExtractorApp:
             )
 
             png_path = os.path.join(base_path, "assets", "logo.png")
-
             icon_image = ImageTk.PhotoImage(Image.open(png_path))
-
             self.root.iconphoto(True, icon_image)
 
         except Exception as e:
@@ -49,7 +42,31 @@ class TelegramExtractorApp:
         self.browser = None
         self.page = None
 
+        # Graceful shutdown on window close
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
         self.build_ui()
+
+    def on_close(self):
+        """Clean up browser and playwright before closing the window."""
+        self._close_browser()
+        self.root.destroy()
+
+    def _close_browser(self):
+        """Safely close browser and stop playwright instance."""
+        try:
+            if self.browser:
+                self.browser.close()
+                self.browser = None
+        except Exception:
+            pass
+
+        try:
+            if self.playwright:
+                self.playwright.stop()
+                self.playwright = None
+        except Exception:
+            pass
 
     def build_ui(self):
         title = ctk.CTkLabel(
@@ -152,18 +169,24 @@ class TelegramExtractorApp:
                     pass
 
     def start_login(self):
-        self.login_thread()
+        # Run in background thread to avoid freezing the UI
+        self.start_button.configure(state="disabled")
+        t = threading.Thread(target=self._login_worker, daemon=True)
+        t.start()
 
-    def login_thread(self):
+    def _login_worker(self):
         try:
             phone = self.phone_entry.get().strip()
 
             if not phone.startswith("+"):
                 self.log("[!] Номер должен начинаться с +")
+                self.root.after(0, lambda: self.start_button.configure(state="normal"))
                 return
 
             self.log("[+] Loading browser...")
-            self.root.update()
+
+            # Close any previously opened browser before starting fresh
+            self._close_browser()
 
             self.playwright = sync_playwright().start()
             base_path = getattr(
@@ -189,7 +212,6 @@ class TelegramExtractorApp:
             self.page = context.new_page()
 
             self.log("[+] Открываем my.telegram.org...")
-            self.root.update()
 
             self.page.goto("https://my.telegram.org/auth")
 
@@ -204,16 +226,20 @@ class TelegramExtractorApp:
             self.click_submit()
 
             self.log("[+] Код отправлен в Telegram")
-            self.root.update()
             self.log("[+] Введите код и нажмите 'Подтвердить код'")
 
         except Exception as e:
             self.log(f"[!] Ошибка: {e}")
+        finally:
+            self.root.after(0, lambda: self.start_button.configure(state="normal"))
 
     def submit_code(self):
-        self.submit_code_thread()
+        # Run in background thread to avoid freezing the UI
+        self.code_button.configure(state="disabled")
+        t = threading.Thread(target=self._submit_code_worker, daemon=True)
+        t.start()
 
-    def submit_code_thread(self):
+    def _submit_code_worker(self):
         try:
             code = self.code_entry.get().strip()
 
@@ -234,6 +260,8 @@ class TelegramExtractorApp:
 
         except Exception as e:
             self.log(f"[!] Ошибка подтверждения: {e}")
+        finally:
+            self.root.after(0, lambda: self.code_button.configure(state="normal"))
 
     def create_app(self):
         self.log("[+] Создаём приложение...")
@@ -298,11 +326,14 @@ class TelegramExtractorApp:
             f"API_HASH: {data['api_hash']}\n"
         )
 
-        self.result_box.delete("1.0", "end")
-        self.result_box.insert("end", result)
+        self.root.after(0, lambda: self._update_result(result))
 
         self.log("[+] Данные успешно получены")
         self.log(f"[+] Сохранено: {OUTPUT_FILE}")
+
+    def _update_result(self, result):
+        self.result_box.delete("1.0", "end")
+        self.result_box.insert("end", result)
 
     def copy_result(self):
         text = self.result_box.get("1.0", "end")
