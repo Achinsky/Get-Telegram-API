@@ -1,0 +1,16 @@
+# PyInstaller build output
+build/
+dist/
+
+# Runtime output
+output/
+settings.json
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
