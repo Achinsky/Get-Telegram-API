@@ -1,4 +1,5 @@
 import json
+import queue
 import random
 import re
 import threading
@@ -39,12 +40,11 @@ def find_chromium_executable() -> str | None:
     if not playwright_dir.exists():
         return None
 
-    # Walk chromium-* directories sorted descending — pick the newest
     for chromium_dir in sorted(playwright_dir.glob("chromium-*"), reverse=True):
         candidates = [
-            chromium_dir / "chrome-win64" / "chrome.exe",   # Windows
-            chromium_dir / "chrome-mac"  / "Chromium.app" / "Contents" / "MacOS" / "Chromium",  # macOS
-            chromium_dir / "chrome-linux" / "chrome",        # Linux
+            chromium_dir / "chrome-win64" / "chrome.exe",
+            chromium_dir / "chrome-mac" / "Chromium.app" / "Contents" / "MacOS" / "Chromium",
+            chromium_dir / "chrome-linux" / "chrome",
         ]
         for candidate in candidates:
             if candidate.exists():
@@ -54,11 +54,18 @@ def find_chromium_executable() -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Business logic — no UI code here
+# Business logic — runs entirely inside one dedicated thread
 # ---------------------------------------------------------------------------
 
 class TelegramExtractor:
-    """Handles all browser automation and data extraction logic."""
+    """
+    Handles all Playwright work in a single persistent background thread.
+
+    Playwright's sync API requires that every call (including page.fill,
+    page.goto, etc.) happens on the *same* thread that called
+    sync_playwright().start().  We solve this with a task queue: the UI
+    posts callables, the worker thread executes them one by one.
+    """
 
     def __init__(self, log_callback):
         self._log = log_callback
@@ -66,16 +73,55 @@ class TelegramExtractor:
         self.browser = None
         self.page = None
 
+        # Single persistent worker thread — all Playwright calls run here
+        self._task_queue: queue.Queue = queue.Queue()
+        self._worker_thread = threading.Thread(
+            target=self._worker_loop, daemon=True
+        )
+        self._worker_thread.start()
+
+    # ------------------------------------------------------------------
+    # Worker loop — the only thread that touches Playwright
+    # ------------------------------------------------------------------
+
+    def _worker_loop(self):
+        """Pull tasks from the queue and execute them sequentially."""
+        while True:
+            task, result_event, result_box = self._task_queue.get()
+            if task is None:          # poison pill — shut down
+                break
+            try:
+                result = task()
+                result_box["value"] = result
+                result_box["error"] = None
+            except Exception as exc:
+                result_box["value"] = None
+                result_box["error"] = exc
+            finally:
+                result_event.set()
+
+    def _run(self, fn):
+        """
+        Submit *fn* to the worker thread and block until it finishes.
+        Re-raises any exception that occurred inside the worker.
+        """
+        result_box = {"value": None, "error": None}
+        event = threading.Event()
+        self._task_queue.put((fn, event, result_box))
+        event.wait()
+        if result_box["error"] is not None:
+            raise result_box["error"]
+        return result_box["value"]
+
     # ------------------------------------------------------------------
     # Browser lifecycle
     # ------------------------------------------------------------------
 
-    def start_browser(self):
-        """Launch Playwright + Chromium. Closes any previous session first."""
-        self.close_browser()
+    def _start_browser(self):
+        """Launch Playwright + Chromium (called inside worker thread)."""
+        self._close_browser_internal()
 
         self.playwright = sync_playwright().start()
-
         exe_path = find_chromium_executable()
 
         launch_kwargs = {"headless": False}
@@ -83,22 +129,20 @@ class TelegramExtractor:
             self._log(f"[+] Chromium: {exe_path}")
             launch_kwargs["executable_path"] = exe_path
         else:
-            # Fall back to the Playwright-managed browser
             self._log("[+] Bundled Chromium not found — using system Playwright install")
 
         self.browser = self.playwright.chromium.launch(**launch_kwargs)
         context = self.browser.new_context()
         self.page = context.new_page()
 
-    def close_browser(self):
-        """Safely close browser and stop Playwright."""
+    def _close_browser_internal(self):
+        """Close browser — must be called from the worker thread."""
         try:
             if self.browser:
                 self.browser.close()
                 self.browser = None
         except Exception:
             pass
-
         try:
             if self.playwright:
                 self.playwright.stop()
@@ -106,41 +150,55 @@ class TelegramExtractor:
         except Exception:
             pass
 
+    def close_browser(self):
+        """Public method — safely closes browser from any thread."""
+        self._run(self._close_browser_internal)
+
+    def stop(self):
+        """Shut down the worker thread cleanly."""
+        self._task_queue.put((None, threading.Event(), {}))
+
     # ------------------------------------------------------------------
-    # Telegram auth
+    # Telegram auth (public API — safe to call from any thread)
     # ------------------------------------------------------------------
 
     def send_code(self, phone: str):
         """Navigate to my.telegram.org and request a login code."""
-        self._log("[+] Loading browser...")
-        self.start_browser()
+        def _task():
+            self._log("[+] Loading browser...")
+            self._start_browser()
 
-        self._log("[+] Открываем my.telegram.org...")
-        self.page.goto("https://my.telegram.org/auth")
+            self._log("[+] Открываем my.telegram.org...")
+            self.page.goto("https://my.telegram.org/auth")
 
-        phone_input = self.page.get_by_role("textbox", name="Your Phone Number")
-        phone_input.wait_for(timeout=30000)
-        phone_input.fill(phone)
+            phone_input = self.page.get_by_role("textbox", name="Your Phone Number")
+            phone_input.wait_for(timeout=30000)
+            phone_input.fill(phone)
 
-        self._click_submit()
+            self._click_submit()
 
-        self._log("[+] Код отправлен в Telegram")
-        self._log("[+] Введите код и нажмите 'Подтвердить код'")
+            self._log("[+] Код отправлен в Telegram")
+            self._log("[+] Введите код и нажмите 'Подтвердить код'")
+
+        self._run(_task)
 
     def confirm_code(self, code: str) -> dict:
         """Enter the confirmation code and extract API credentials."""
-        code_input = self.page.get_by_placeholder("Confirmation code")
-        code_input.wait_for(timeout=30000)
-        code_input.fill(code)
+        def _task():
+            code_input = self.page.get_by_placeholder("Confirmation code")
+            code_input.wait_for(timeout=30000)
+            code_input.fill(code)
 
-        self._click_submit()
-        self.page.wait_for_timeout(3000)
+            self._click_submit()
+            self.page.wait_for_timeout(3000)
 
-        self._log("[+] Авторизация успешна")
-        return self._extract_credentials()
+            self._log("[+] Авторизация успешна")
+            return self._extract_credentials()
+
+        return self._run(_task)
 
     # ------------------------------------------------------------------
-    # Helpers
+    # Internal helpers (always called from worker thread via _run)
     # ------------------------------------------------------------------
 
     def _click_submit(self):
@@ -162,7 +220,7 @@ class TelegramExtractor:
     def _create_app(self):
         self._log("[+] Создаём приложение...")
 
-        title_val = f"MyApp{random.randint(1000, 9999)}"
+        title_val  = f"MyApp{random.randint(1000, 9999)}"
         short_name = f"app{random.randint(100000, 999999)}"
 
         self.page.locator("input").nth(0).fill(title_val)
@@ -245,7 +303,7 @@ class TelegramExtractorApp:
             print(e)
 
     def _on_close(self):
-        self.extractor.close_browser()
+        self.extractor.stop()
         self.root.destroy()
 
     # ------------------------------------------------------------------
@@ -312,6 +370,10 @@ class TelegramExtractorApp:
     # ------------------------------------------------------------------
 
     def log(self, text: str):
+        # May be called from the worker thread — use after() for safety
+        self.root.after(0, lambda t=text: self._append_log(t))
+
+    def _append_log(self, text: str):
         self.log_box.insert("end", f"{text}\n")
         self.log_box.see("end")
 
@@ -325,7 +387,8 @@ class TelegramExtractorApp:
         self.log("[+] Результат скопирован")
 
     # ------------------------------------------------------------------
-    # Button handlers — run work in background threads
+    # Button handlers — dispatch to extractor in a plain thread;
+    # the extractor itself serialises everything through its worker queue
     # ------------------------------------------------------------------
 
     def _start_login(self):
