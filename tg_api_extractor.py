@@ -9,7 +9,7 @@ import sys
 import os
 from PIL import Image, ImageTk
 import customtkinter as ctk
-from tkinter import messagebox
+from tkinter import font as tkfont, messagebox
 
 import pyperclip
 from playwright.sync_api import sync_playwright
@@ -23,6 +23,63 @@ ctk.set_default_color_theme("dark-blue")
 ACCENT = "#3B82F6"
 SIDEBAR_WIDTH = 180
 
+# ---------------------------------------------------------------------------
+# Tabler Icons — unicode codepoints from the TTF webfont
+# ---------------------------------------------------------------------------
+TI = {
+    "home":           chr(60097),  # ti-home
+    "key":            chr(60103),  # ti-key
+    "settings":       chr(60192),  # ti-settings
+    "info-circle":    chr(60101),  # ti-info-circle
+    "chevron-down":   chr(59999),  # ti-chevron-down
+    "chevron-up":     chr(60002),  # ti-chevron-up
+    "download":       chr(60054),  # ti-download
+    "copy":           chr(60026),  # ti-copy
+    "brand-github":   chr(60444),  # ti-brand-github
+    "alert-circle":   chr(59909),  # ti-alert-circle
+    "check":          chr(59998),  # ti-check
+    "file-text":      chr(60066),  # ti-file-text
+}
+
+_tabler_font_name = None
+
+
+def _load_tabler_font() -> str | None:
+    """Load Tabler Icons TTF and return tk font family name, or None."""
+    global _tabler_font_name
+    if _tabler_font_name is not None:
+        return _tabler_font_name
+
+    font_path = Path(get_base_path()) / "assets" / "tabler-icons.ttf"
+    if not font_path.exists():
+        return None
+
+    try:
+        # Use tkinter's font loading via CTk root window
+        import ctypes
+        if sys.platform == "win32":
+            ctypes.windll.gdi32.AddFontResourceExW(str(font_path), 0x10, 0)
+        _tabler_font_name = "tabler-icons"
+        return _tabler_font_name
+    except Exception:
+        return None
+
+
+def ti(icon: str, size: int = 15) -> tuple:
+    """Return (text, font) tuple for a Tabler icon, or fallback text."""
+    name = _load_tabler_font()
+    if name:
+        return TI.get(icon, "?"), (name, size)
+    # Fallback symbols if font not available
+    fallbacks = {
+        "home": "⌂", "key": "🔑", "settings": "⚙",
+        "info-circle": "ℹ", "download": "↓", "copy": "⎘",
+        "brand-github": "⎋", "alert-circle": "⚠", "check": "✓",
+    }
+    return fallbacks.get(icon, "•"), None
+
+
+# ---------------------------------------------------------------------------
 
 def get_base_path() -> str:
     return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
@@ -178,14 +235,11 @@ class TelegramExtractor:
 
         m_test_host = re.search(r"Test configuration:\s*([\d.:]+)", text)
         m_prod_host = re.search(r"Production configuration:\s*([\d.:]+)", text)
-        m_test_key  = re.search(r"(-----BEGIN RSA PUBLIC KEY-----.*?-----END RSA PUBLIC KEY-----)", text, re.S)
-        m_prod_key  = re.search(r"(-----BEGIN RSA PUBLIC KEY-----.*?-----END RSA PUBLIC KEY-----(?:.*?-----BEGIN RSA PUBLIC KEY-----.*?-----END RSA PUBLIC KEY-----)?)", text, re.S)
-
         keys_raw = re.findall(r"(-----BEGIN RSA PUBLIC KEY-----.*?-----END RSA PUBLIC KEY-----)", text, re.S)
 
         data = {
-            "api_id":   int(m_id.group(1)),
-            "api_hash": m_hash.group(1),
+            "api_id":            int(m_id.group(1)),
+            "api_hash":          m_hash.group(1),
             "test_server":       m_test_host.group(1) if m_test_host else "",
             "production_server": m_prod_host.group(1) if m_prod_host else "",
             "public_keys":       keys_raw,
@@ -204,9 +258,12 @@ class TelegramExtractor:
 # UI helpers
 # ---------------------------------------------------------------------------
 
+def _sys_font(size=13, bold=False):
+    return (ctk.ThemeManager.theme["CTkFont"]["family"], size, "bold" if bold else "normal")
+
+
 def _label(parent, text, font_size=13, weight="normal", color=None, **kw):
-    kwargs = dict(text=text, font=(ctk.ThemeManager.theme["CTkFont"]["family"], font_size,
-                                   "bold" if weight == "bold" else "normal"))
+    kwargs = dict(text=text, font=_sys_font(font_size, weight == "bold"))
     if color:
         kwargs["text_color"] = color
     return ctk.CTkLabel(parent, **kwargs, **kw)
@@ -220,36 +277,36 @@ def _btn(parent, text, cmd, width=160, fg=None, **kw):
 
 
 # ---------------------------------------------------------------------------
-# Sidebar nav button
+# Sidebar nav button — uses Tabler icon if font is available
 # ---------------------------------------------------------------------------
 
 class NavButton(ctk.CTkButton):
-    def __init__(self, parent, text, icon, command, **kw):
+    def __init__(self, parent, label: str, icon_name: str, command, **kw):
+        icon_char, icon_font = ti(icon_name, 16)
+        # Use icon font if available, else fallback to system font
+        font = icon_font if icon_font else _sys_font(13)
+        # Build display text: icon + label
+        display = f"  {icon_char}  {label}"
+
         super().__init__(
-            parent, text=f"  {icon}  {text}", command=command,
+            parent, text=display, command=command,
             anchor="w", width=SIDEBAR_WIDTH - 16,
             fg_color="transparent", hover_color=("#d0d4da", "#2a2d35"),
             text_color=("gray40", "gray70"), corner_radius=8,
-            font=(ctk.ThemeManager.theme["CTkFont"]["family"], 13), **kw
+            font=_sys_font(13), **kw
         )
-        self._active = False
+        self._icon_char = icon_char
+        self._label = label
 
     def set_active(self, active: bool):
-        self._active = active
         if active:
-            self.configure(
-                fg_color=(ACCENT, ACCENT),
-                text_color=("white", "white"),
-            )
+            self.configure(fg_color=(ACCENT, ACCENT), text_color=("white", "white"))
         else:
-            self.configure(
-                fg_color="transparent",
-                text_color=("gray40", "gray70"),
-            )
+            self.configure(fg_color="transparent", text_color=("gray40", "gray70"))
 
 
 # ---------------------------------------------------------------------------
-# Tab frames
+# Tab: Main (auth)
 # ---------------------------------------------------------------------------
 
 class MainTab(ctk.CTkFrame):
@@ -264,9 +321,11 @@ class MainTab(ctk.CTkFrame):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(5, weight=1)
 
-        _label(self, "Авторизация", 20, "bold").grid(row=0, column=0, sticky="w", padx=28, pady=(28, 2))
+        _label(self, "Авторизация", 20, "bold").grid(
+            row=0, column=0, sticky="w", padx=28, pady=(28, 2))
         _label(self, "Введите номер телефона — получите api_id и api_hash", 13,
-               color=("gray40", "gray60")).grid(row=1, column=0, sticky="w", padx=28, pady=(0, 20))
+               color=("gray40", "gray60")).grid(
+            row=1, column=0, sticky="w", padx=28, pady=(0, 20))
 
         phone_row = ctk.CTkFrame(self, fg_color="transparent")
         phone_row.grid(row=2, column=0, sticky="ew", padx=28, pady=(0, 10))
@@ -286,17 +345,17 @@ class MainTab(ctk.CTkFrame):
 
         log_header = ctk.CTkFrame(self, fg_color="transparent")
         log_header.grid(row=4, column=0, sticky="ew", padx=28, pady=(0, 4))
-        _label(log_header, "Лог", 12, color=("gray50", "gray50")).pack(side="left")
+        _label(log_header, "ЛОГ", 11, color=("gray50", "gray50")).pack(side="left")
         self.toggle_btn = ctk.CTkButton(
             log_header, text="скрыть", width=60, height=22,
             fg_color="transparent", hover_color=("#e5e7eb", "#2a2d35"),
-            text_color=("gray50", "gray50"), font=(ctk.ThemeManager.theme["CTkFont"]["family"], 11),
+            text_color=("gray50", "gray50"), font=_sys_font(11),
             command=self._toggle_log
         )
         self.toggle_btn.pack(side="right")
 
-        self.log_box = ctk.CTkTextbox(self, height=180, state="disabled",
-                                      font=(ctk.ThemeManager.theme["CTkFont"]["family"], 12))
+        self.log_box = ctk.CTkTextbox(
+            self, height=180, state="disabled", font=_sys_font(12))
         self.log_box.grid(row=5, column=0, sticky="nsew", padx=28, pady=(0, 28))
 
     def log(self, text: str):
@@ -304,7 +363,6 @@ class MainTab(ctk.CTkFrame):
 
     def _append(self, text: str):
         self.log_box.configure(state="normal")
-        tag = "ok" if text.startswith("[+]") else "err"
         self.log_box.insert("end", text + "\n")
         self.log_box.see("end")
         self.log_box.configure(state="disabled")
@@ -352,6 +410,10 @@ class MainTab(ctk.CTkFrame):
             self.after(0, lambda: self.btn_confirm.configure(state="normal"))
 
 
+# ---------------------------------------------------------------------------
+# Tab: My Data
+# ---------------------------------------------------------------------------
+
 class DataTab(ctk.CTkFrame):
     def __init__(self, parent):
         super().__init__(parent, fg_color="transparent")
@@ -360,9 +422,10 @@ class DataTab(ctk.CTkFrame):
 
     def _build_empty(self):
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(10, weight=1)
+        self.grid_rowconfigure(6, weight=1)
 
-        _label(self, "Мои данные", 20, "bold").grid(row=0, column=0, sticky="w", padx=28, pady=(28, 2))
+        _label(self, "Мои данные", 20, "bold").grid(
+            row=0, column=0, sticky="w", padx=28, pady=(28, 2))
         self._sub = _label(self, "Данные появятся после успешной авторизации", 13,
                            color=("gray40", "gray60"))
         self._sub.grid(row=1, column=0, sticky="w", padx=28, pady=(0, 20))
@@ -370,16 +433,16 @@ class DataTab(ctk.CTkFrame):
         self._cards_frame = ctk.CTkFrame(self, fg_color="transparent")
         self._cards_frame.grid(row=2, column=0, sticky="ew", padx=28, pady=(0, 16))
 
-        self._export_label = _label(self, "Экспорт", 13, "bold")
-        self._export_label.grid(row=3, column=0, sticky="w", padx=28, pady=(0, 8))
+        _label(self, "Экспорт", 13, "bold").grid(
+            row=3, column=0, sticky="w", padx=28, pady=(0, 8))
         self._export_frame = ctk.CTkFrame(self, fg_color="transparent")
         self._export_frame.grid(row=4, column=0, sticky="w", padx=28, pady=(0, 20))
 
-        self._keys_label = _label(self, "Public keys", 13, "bold")
-        self._keys_label.grid(row=5, column=0, sticky="w", padx=28, pady=(0, 8))
-        self._keys_box = ctk.CTkTextbox(self, height=160, state="disabled",
-                                        font=(ctk.ThemeManager.theme["CTkFont"]["family"], 11))
-        self._keys_box.grid(row=6, column=0, sticky="ew", padx=28, pady=(0, 28))
+        _label(self, "Public keys", 13, "bold").grid(
+            row=5, column=0, sticky="w", padx=28, pady=(0, 8))
+        self._keys_box = ctk.CTkTextbox(
+            self, height=160, state="disabled", font=_sys_font(11))
+        self._keys_box.grid(row=6, column=0, sticky="nsew", padx=28, pady=(0, 28))
 
     def update_data(self, data: dict):
         self._data = data
@@ -389,17 +452,19 @@ class DataTab(ctk.CTkFrame):
             w.destroy()
 
         cards = [
-            ("App api_id",           str(data["api_id"])),
-            ("App api_hash",         data["api_hash"]),
-            ("Test server",          data.get("test_server", "—")),
-            ("Production server",    data.get("production_server", "—")),
+            ("App api_id",        str(data["api_id"])),
+            ("App api_hash",      data["api_hash"]),
+            ("Test server",       data.get("test_server", "—")),
+            ("Production server", data.get("production_server", "—")),
         ]
-        for i, (label, value) in enumerate(cards):
+        for i, (lbl, val) in enumerate(cards):
             card = ctk.CTkFrame(self._cards_frame, corner_radius=10)
-            card.grid(row=i // 2, column=i % 2, padx=(0 if i%2==0 else 8, 0), pady=4, sticky="ew")
+            card.grid(row=i // 2, column=i % 2,
+                      padx=(0 if i % 2 == 0 else 8, 0), pady=4, sticky="ew")
             self._cards_frame.grid_columnconfigure(i % 2, weight=1)
-            _label(card, label, 11, color=("gray50", "gray50")).pack(anchor="w", padx=14, pady=(10, 2))
-            _label(card, value, 13, "bold").pack(anchor="w", padx=14, pady=(0, 10))
+            _label(card, lbl, 11, color=("gray50", "gray50")).pack(
+                anchor="w", padx=14, pady=(10, 2))
+            _label(card, val, 13, "bold").pack(anchor="w", padx=14, pady=(0, 10))
 
         for w in self._export_frame.winfo_children():
             w.destroy()
@@ -412,14 +477,14 @@ class DataTab(ctk.CTkFrame):
             (".md",   self._export_md),
             ("⎘ Копировать", self._copy_all),
         ]
-        for label, cmd in formats:
+        for lbl, cmd in formats:
             b = ctk.CTkButton(
-                self._export_frame, text=label, command=cmd,
+                self._export_frame, text=lbl, command=cmd,
                 width=90, height=30, fg_color="transparent",
                 border_width=1, border_color=("gray70", "gray40"),
                 text_color=("gray30", "gray80"),
                 hover_color=("#e5e7eb", "#2a2d35"),
-                font=(ctk.ThemeManager.theme["CTkFont"]["family"], 12)
+                font=_sys_font(12)
             )
             b.pack(side="left", padx=(0, 6))
 
@@ -476,10 +541,10 @@ class DataTab(ctk.CTkFrame):
         with open(path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(["field", "value"])
-            w.writerow(["api_id",            self._data["api_id"]])
-            w.writerow(["api_hash",           self._data["api_hash"]])
-            w.writerow(["test_server",        self._data.get("test_server", "")])
-            w.writerow(["production_server",  self._data.get("production_server", "")])
+            w.writerow(["api_id",           self._data["api_id"]])
+            w.writerow(["api_hash",          self._data["api_hash"]])
+            w.writerow(["test_server",       self._data.get("test_server", "")])
+            w.writerow(["production_server", self._data.get("production_server", "")])
         messagebox.showinfo("Экспорт", f"Сохранено: {path}")
 
     def _export_md(self):
@@ -488,8 +553,8 @@ class DataTab(ctk.CTkFrame):
         path = self._get_path(".md")
         lines = [
             "# Telegram API credentials\n",
-            f"| Field | Value |",
-            f"|-------|-------|",
+            "| Field | Value |",
+            "|-------|-------|",
             f"| api_id | `{self._data['api_id']}` |",
             f"| api_hash | `{self._data['api_hash']}` |",
             f"| test_server | `{self._data.get('test_server', '')}` |",
@@ -506,12 +571,16 @@ class DataTab(ctk.CTkFrame):
         text = (
             f"api_id = {self._data['api_id']}\n"
             f"api_hash = {self._data['api_hash']}\n"
-            f"test_server = {self._data.get('test_server','')}\n"
-            f"production_server = {self._data.get('production_server','')}\n"
+            f"test_server = {self._data.get('test_server', '')}\n"
+            f"production_server = {self._data.get('production_server', '')}\n"
         )
         pyperclip.copy(text)
         messagebox.showinfo("Скопировано", "Данные скопированы в буфер обмена")
 
+
+# ---------------------------------------------------------------------------
+# Tab: Settings
+# ---------------------------------------------------------------------------
 
 class SettingsTab(ctk.CTkFrame):
     def __init__(self, parent):
@@ -520,17 +589,18 @@ class SettingsTab(ctk.CTkFrame):
 
     def _build(self):
         self.grid_columnconfigure(0, weight=1)
-        _label(self, "Настройки", 20, "bold").grid(row=0, column=0, sticky="w", padx=28, pady=(28, 20))
+        _label(self, "Настройки", 20, "bold").grid(
+            row=0, column=0, sticky="w", padx=28, pady=(28, 20))
 
         settings = [
-            ("Headless-режим", "Скрывать окно браузера при работе"),
-            ("Автосохранение", "Сохранять credentials.json автоматически"),
-            ("Системная тема", "Следовать тёмной/светлой теме ОС"),
+            ("Headless-режим",  "Скрывать окно браузера при работе",       False),
+            ("Автосохранение",  "Сохранять credentials.json автоматически", True),
+            ("Системная тема",  "Следовать тёмной/светлой теме ОС",         True),
         ]
         self._switches = {}
-        for i, (name, desc) in enumerate(settings):
+        for i, (name, desc, default) in enumerate(settings):
             row = ctk.CTkFrame(self, fg_color="transparent")
-            row.grid(row=i+1, column=0, sticky="ew", padx=28, pady=4)
+            row.grid(row=i + 1, column=0, sticky="ew", padx=28, pady=4)
             row.grid_columnconfigure(0, weight=1)
             info = ctk.CTkFrame(row, fg_color="transparent")
             info.grid(row=0, column=0, sticky="w")
@@ -538,13 +608,16 @@ class SettingsTab(ctk.CTkFrame):
             _label(info, desc, 12, color=("gray50", "gray50")).pack(anchor="w")
             sw = ctk.CTkSwitch(row, text="", width=46)
             sw.grid(row=0, column=1, padx=(10, 0))
-            if name == "Автосохранение":
+            if default:
                 sw.select()
             self._switches[name] = sw
-
             sep = ctk.CTkFrame(self, height=1, fg_color=("gray85", "gray25"))
-            sep.grid(row=i+10, column=0, sticky="ew", padx=28, pady=2)
+            sep.grid(row=i + 10, column=0, sticky="ew", padx=28, pady=2)
 
+
+# ---------------------------------------------------------------------------
+# Tab: About
+# ---------------------------------------------------------------------------
 
 class AboutTab(ctk.CTkFrame):
     def __init__(self, parent):
@@ -553,7 +626,8 @@ class AboutTab(ctk.CTkFrame):
 
     def _build(self):
         self.grid_columnconfigure(0, weight=1)
-        _label(self, "О программе", 20, "bold").grid(row=0, column=0, sticky="w", padx=28, pady=(28, 16))
+        _label(self, "О программе", 20, "bold").grid(
+            row=0, column=0, sticky="w", padx=28, pady=(28, 16))
 
         badge = ctk.CTkFrame(self, corner_radius=8)
         badge.grid(row=1, column=0, sticky="w", padx=28, pady=(0, 16))
@@ -566,15 +640,12 @@ class AboutTab(ctk.CTkFrame):
                13, color=("gray40", "gray60"), justify="left"
                ).grid(row=2, column=0, sticky="w", padx=28, pady=(0, 20))
 
-        links = [
-            ("⎋  github.com/Achinsky/Get-Telegram-API", "https://github.com/Achinsky/Get-Telegram-API"),
-            ("⊕  MIT License", None),
-        ]
-        for text, _ in links:
+        for row_i, (text, _) in enumerate([
+            ("  github.com/Achinsky/Get-Telegram-API", None),
+            ("  MIT License", None),
+        ]):
             _label(self, text, 13, color=("gray40", "gray60")).grid(
-                row=links.index((text, _)) + 3,
-                column=0, sticky="w", padx=28, pady=2
-            )
+                row=row_i + 3, column=0, sticky="w", padx=28, pady=2)
 
 
 # ---------------------------------------------------------------------------
@@ -591,60 +662,66 @@ class TelegramExtractorApp:
 
         self.extractor = TelegramExtractor(log_callback=self._log)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-
         self._build_layout()
 
     def _load_icon(self):
+        """Set window icon — try .ico first (Windows), fall back to .png."""
+        base = get_base_path()
+        # .ico for taskbar on Windows
+        ico_path = os.path.join(base, "assets", "logo.ico")
+        png_path = os.path.join(base, "assets", "logo.png")
         try:
-            p = os.path.join(get_base_path(), "assets", "logo.png")
-            self.root.iconphoto(True, ImageTk.PhotoImage(Image.open(p)))
+            if sys.platform == "win32" and os.path.exists(ico_path):
+                self.root.iconbitmap(ico_path)
+            elif os.path.exists(png_path):
+                self.root.iconphoto(True, ImageTk.PhotoImage(Image.open(png_path)))
         except Exception as e:
-            print(e)
+            print(f"Icon load error: {e}")
 
     def _on_close(self):
         self.extractor.stop()
         self.root.destroy()
 
-    # ------------------------------------------------------------------
-    # Layout
-    # ------------------------------------------------------------------
-
     def _build_layout(self):
         self.root.grid_columnconfigure(1, weight=1)
         self.root.grid_rowconfigure(0, weight=1)
 
-        # Sidebar
-        sidebar = ctk.CTkFrame(self.root, width=SIDEBAR_WIDTH, corner_radius=0,
-                                fg_color=("#f3f4f6", "#1c1f26"))
+        # ── Sidebar ──────────────────────────────────────────────────────
+        sidebar = ctk.CTkFrame(
+            self.root, width=SIDEBAR_WIDTH, corner_radius=0,
+            fg_color=("#f3f4f6", "#1c1f26"))
         sidebar.grid(row=0, column=0, sticky="nsew")
         sidebar.grid_propagate(False)
         sidebar.grid_rowconfigure(10, weight=1)
 
-        # Logo
+        # Logo row: image + text
         logo_frame = ctk.CTkFrame(sidebar, fg_color="transparent")
         logo_frame.grid(row=0, column=0, sticky="ew", padx=12, pady=(20, 16))
-        try:
-            p = os.path.join(get_base_path(), "assets", "logo.png")
-            img = ctk.CTkImage(Image.open(p), size=(28, 28))
-            ctk.CTkLabel(logo_frame, image=img, text="").pack(side="left", padx=(4, 8))
-        except Exception:
-            pass
+
+        png_path = os.path.join(get_base_path(), "assets", "logo.png")
+        if os.path.exists(png_path):
+            try:
+                img = ctk.CTkImage(Image.open(png_path), size=(28, 28))
+                ctk.CTkLabel(logo_frame, image=img, text="").pack(side="left", padx=(4, 8))
+            except Exception:
+                pass
         _label(logo_frame, "Get Telegram API", 13, "bold").pack(side="left")
 
         sep = ctk.CTkFrame(sidebar, height=1, fg_color=("gray80", "gray30"))
         sep.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))
 
-        # Content area
-        self._content = ctk.CTkFrame(self.root, corner_radius=0, fg_color="transparent")
+        # ── Content area ─────────────────────────────────────────────────
+        self._content = ctk.CTkFrame(
+            self.root, corner_radius=0, fg_color="transparent")
         self._content.grid(row=0, column=1, sticky="nsew")
         self._content.grid_columnconfigure(0, weight=1)
         self._content.grid_rowconfigure(0, weight=1)
 
-        # Tabs
-        self.data_tab = DataTab(self._content)
-        self.main_tab = MainTab(self._content, self.extractor, self._on_data_ready)
+        # Tabs (stacked)
+        self.data_tab     = DataTab(self._content)
+        self.main_tab     = MainTab(self._content, self.extractor, self._on_data_ready)
         self.settings_tab = SettingsTab(self._content)
-        self.about_tab = AboutTab(self._content)
+        self.about_tab    = AboutTab(self._content)
 
         self._tabs = {
             "main":     self.main_tab,
@@ -655,20 +732,21 @@ class TelegramExtractorApp:
         for tab in self._tabs.values():
             tab.grid(row=0, column=0, sticky="nsew")
 
-        # Nav buttons
+        # Nav buttons with Tabler icons
         nav_items = [
-            ("main",     "🏠", "Главная"),
-            ("data",     "🔑", "Мои данные"),
-            ("settings", "⚙", "Настройки"),
+            ("main",     "home",        "Главная"),
+            ("data",     "key",         "Мои данные"),
+            ("settings", "settings",    "Настройки"),
         ]
         self._nav_btns = {}
-        for i, (key, icon, label) in enumerate(nav_items):
-            btn = NavButton(sidebar, label, icon, command=lambda k=key: self._show_tab(k))
-            btn.grid(row=i+2, column=0, padx=8, pady=2, sticky="ew")
+        for i, (key, icon_name, label) in enumerate(nav_items):
+            btn = NavButton(sidebar, label, icon_name,
+                            command=lambda k=key: self._show_tab(k))
+            btn.grid(row=i + 2, column=0, padx=8, pady=2, sticky="ew")
             self._nav_btns[key] = btn
 
-        # About at bottom
-        about_btn = NavButton(sidebar, "О программе", "ℹ", command=lambda: self._show_tab("about"))
+        about_btn = NavButton(sidebar, "О программе", "info-circle",
+                              command=lambda: self._show_tab("about"))
         about_btn.grid(row=10, column=0, padx=8, pady=(0, 12), sticky="sew")
         self._nav_btns["about"] = about_btn
 
